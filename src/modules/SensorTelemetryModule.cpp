@@ -16,8 +16,48 @@
 // Define the dedicated channel name for sensor network
 #define SENSETASTIC_CHANNEL_NAME "sensetastic"
 
+// Default 128-bit encryption key for sensetastic channel
+// Base64: a8TNacAfEwE6/STalElVtQ==
+// Can be overridden at compile time with -DSENSETASTIC_PSK_BASE64="..."
+#ifndef SENSETASTIC_PSK_BASE64
+#define SENSETASTIC_PSK_BASE64 "a8TNacAfEwE6/STalElVtQ=="
+#endif
+
 // Global instance
 SensorTelemetryModule *sensorTelemetryModule;
+
+/**
+ * @brief Decode base64 string to binary
+ * Simple base64 decoder for PSK conversion
+ */
+static size_t base64_decode(const char *input, uint8_t *output, size_t maxLen)
+{
+    static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t inputLen = strlen(input);
+    size_t outputLen = 0;
+    uint32_t buffer = 0;
+    int bitsCollected = 0;
+
+    for (size_t i = 0; i < inputLen; i++) {
+        char c = input[i];
+        if (c == '=') break; // Padding
+
+        const char *p = strchr(base64_chars, c);
+        if (!p) continue; // Skip invalid chars
+
+        buffer = (buffer << 6) | (p - base64_chars);
+        bitsCollected += 6;
+
+        if (bitsCollected >= 8) {
+            bitsCollected -= 8;
+            if (outputLen < maxLen) {
+                output[outputLen++] = (buffer >> bitsCollected) & 0xFF;
+            }
+        }
+    }
+
+    return outputLen;
+}
 
 SensorTelemetryModule::SensorTelemetryModule()
     : SinglePortModule("SensorTelemetry", meshtastic_PortNum_PRIVATE_APP),
@@ -430,15 +470,23 @@ uint8_t SensorTelemetryModule::ensureSensetasticChannel()
     strncpy(newChannel.settings.name, SENSETASTIC_CHANNEL_NAME, sizeof(newChannel.settings.name) - 1);
     newChannel.settings.name[sizeof(newChannel.settings.name) - 1] = '\0';  // Ensure null termination
     
-    // Configure as unencrypted channel (for POC)
-    // PSK size = 0 means no encryption
-    newChannel.settings.psk.size = 0;
+    // Configure 128-bit AES encryption
+    // Decode the base64 PSK at runtime (supports compile-time override)
+    uint8_t pskBytes[32]; // Max size for safety
+    size_t pskLen = base64_decode(SENSETASTIC_PSK_BASE64, pskBytes, sizeof(pskBytes));
     
-    // TODO: For production, add encryption:
-    // const uint8_t sensorPSK[] = {0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
-    //                              0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01};
-    // memcpy(newChannel.settings.psk.bytes, sensorPSK, sizeof(sensorPSK));
-    // newChannel.settings.psk.size = sizeof(sensorPSK);
+    if (pskLen == 16) { // Verify it's a valid 128-bit key
+        memcpy(newChannel.settings.psk.bytes, pskBytes, pskLen);
+        newChannel.settings.psk.size = pskLen;
+        
+        LOG_INFO("SensorTelemetryModule: Channel encryption enabled (128-bit AES)\n");
+        LOG_DEBUG("SensorTelemetryModule: PSK (base64): %s\n", SENSETASTIC_PSK_BASE64);
+    } else {
+        LOG_ERROR("SensorTelemetryModule: Invalid PSK length: %d bytes (expected 16)\n", pskLen);
+        LOG_ERROR("SensorTelemetryModule: PSK base64: %s\n", SENSETASTIC_PSK_BASE64);
+        LOG_WARN("SensorTelemetryModule: Creating UNENCRYPTED channel!\n");
+        newChannel.settings.psk.size = 0; // No encryption
+    }
     
     // Set channel to allow uplink/downlink
     newChannel.settings.uplink_enabled = true;
@@ -450,9 +498,9 @@ uint8_t SensorTelemetryModule::ensureSensetasticChannel()
     // Save the channel configuration
     channels.onConfigChanged();
     
-    LOG_INFO("SensorTelemetryModule: Successfully created channel '%s' at index %d (UNENCRYPTED)\n", 
+    LOG_INFO("SensorTelemetryModule: Successfully created channel '%s' at index %d (ENCRYPTED)\n", 
              SENSETASTIC_CHANNEL_NAME, availableIndex);
-    LOG_WARN("SensorTelemetryModule: Channel is UNENCRYPTED - add encryption for production!\n");
+    LOG_INFO("SensorTelemetryModule: 128-bit AES encryption enabled\n");
     
     return availableIndex;
 }

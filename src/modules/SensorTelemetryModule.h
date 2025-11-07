@@ -210,6 +210,27 @@ class SensorTelemetryModule : public SinglePortModule, private concurrency::OSTh
      * @return String Node ID (e.g., "a1b2c3d4")
      */
     String getNodeId();
+
+    /**
+     * @brief Ensure the "sensetastic" channel exists and is configured
+     * 
+     * Creates or updates the sensetastic channel if it doesn't exist.
+     * Channel will be unencrypted (for POC) with standard settings.
+     * 
+     * @return uint8_t Channel index (0-7) of sensetastic channel, or 0xFF if failed
+     * 
+     * TODO: Add encryption in production
+     * TODO: Make channel name configurable
+     */
+    uint8_t ensureSensetasticChannel();
+
+    /**
+     * @brief Find channel index by name
+     * 
+     * @param channelName Name of the channel to find
+     * @return uint8_t Channel index (0-7), or 0xFF if not found
+     */
+    uint8_t findChannelByName(const char *channelName);
 };
 
 /** @brief Global instance of the sensor telemetry module */

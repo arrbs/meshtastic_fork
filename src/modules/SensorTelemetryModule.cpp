@@ -9,8 +9,12 @@
 #include "RTC.h"
 #include "Router.h"
 #include "configuration.h"
+#include "mesh/Channels.h"
 #include "mesh/generated/meshtastic/telemetry.pb.h"
 #include <Arduino.h>
+
+// Define the dedicated channel name for sensor network
+#define SENSETASTIC_CHANNEL_NAME "sensetastic"
 
 // Global instance
 SensorTelemetryModule *sensorTelemetryModule;
@@ -20,6 +24,18 @@ SensorTelemetryModule::SensorTelemetryModule()
       OSThread("SensorTelem")
 {
     LOG_INFO("SensorTelemetryModule: Initializing...\n");
+    
+    // Ensure the "sensetastic" channel exists and bind to it
+    uint8_t channelIndex = ensureSensetasticChannel();
+    if (channelIndex != 0xFF) {
+        LOG_INFO("SensorTelemetryModule: Using channel '%s' (index %d)\n", 
+                 SENSETASTIC_CHANNEL_NAME, channelIndex);
+        // Bind this module to the sensetastic channel
+        boundChannel = SENSETASTIC_CHANNEL_NAME;
+    } else {
+        LOG_ERROR("SensorTelemetryModule: Failed to create/find sensetastic channel!\n");
+        LOG_WARN("SensorTelemetryModule: Will use default channel\n");
+    }
     
     // TODO: Load configuration from NodeDB preferences
     // TODO: Validate configuration parameters
@@ -290,6 +306,22 @@ bool SensorTelemetryModule::sendToMesh(const String &payload, bool wantAck)
         return false;
     }
     
+    // Verify we're on the sensetastic channel
+    uint8_t channelIndex = findChannelByName(SENSETASTIC_CHANNEL_NAME);
+    if (channelIndex == 0xFF) {
+        LOG_ERROR("SensorTelemetryModule: sensetastic channel not found, cannot send!\n");
+        return false;
+    }
+    
+    // Check if we're using the default public channel (security check)
+    if (!channels.isDefaultChannel(channelIndex)) {
+        LOG_DEBUG("SensorTelemetryModule: Using channel index %d (%s)\n", 
+                 channelIndex, SENSETASTIC_CHANNEL_NAME);
+    } else {
+        LOG_WARN("SensorTelemetryModule: Attempting to send on default public channel!\n");
+        LOG_WARN("SensorTelemetryModule: Sensor data should use dedicated channel\n");
+    }
+    
     // Create mesh packet
     meshtastic_MeshPacket *p = allocDataPacket();
     if (!p) {
@@ -301,11 +333,13 @@ bool SensorTelemetryModule::sendToMesh(const String &payload, bool wantAck)
     p->to = NODENUM_BROADCAST;  // Broadcast to all nodes
     p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
     p->want_ack = wantAck;
+    p->channel = channelIndex;  // Explicitly set channel
     p->decoded.payload.size = payload.length();
     memcpy(p->decoded.payload.bytes, payload.c_str(), payload.length());
     
     // Send via router
-    LOG_DEBUG("SensorTelemetryModule: Sending %d bytes to mesh...\n", payload.length());
+    LOG_DEBUG("SensorTelemetryModule: Sending %d bytes to mesh on channel %d...\n", 
+             payload.length(), channelIndex);
     
     // Use the global service to send the mesh packet
     service->sendToMesh(p);
@@ -335,4 +369,90 @@ String SensorTelemetryModule::getNodeId()
     snprintf(hexId, sizeof(hexId), "%08x", nodeNum);
     
     return String(hexId);
+}
+
+uint8_t SensorTelemetryModule::findChannelByName(const char *channelName)
+{
+    // Search through all channels (0-7) to find one with matching name
+    for (uint8_t i = 0; i < channels.getNumChannels(); i++) {
+        const meshtastic_Channel &ch = channels.getByIndex(i);
+        if (ch.has_settings && strcmp(ch.settings.name, channelName) == 0) {
+            LOG_DEBUG("SensorTelemetryModule: Found channel '%s' at index %d\n", channelName, i);
+            return i;
+        }
+    }
+    
+    LOG_DEBUG("SensorTelemetryModule: Channel '%s' not found\n", channelName);
+    return 0xFF;  // Not found
+}
+
+uint8_t SensorTelemetryModule::ensureSensetasticChannel()
+{
+    // Check if sensetastic channel already exists
+    uint8_t existingIndex = findChannelByName(SENSETASTIC_CHANNEL_NAME);
+    if (existingIndex != 0xFF) {
+        LOG_INFO("SensorTelemetryModule: Channel '%s' already exists at index %d\n", 
+                 SENSETASTIC_CHANNEL_NAME, existingIndex);
+        return existingIndex;
+    }
+    
+    // Channel doesn't exist, try to create it
+    LOG_INFO("SensorTelemetryModule: Creating new channel '%s'\n", SENSETASTIC_CHANNEL_NAME);
+    
+    // Find first available (unused) channel slot
+    uint8_t availableIndex = 0xFF;
+    for (uint8_t i = 0; i < channels.getNumChannels(); i++) {
+        meshtastic_Channel &ch = channels.getByIndex(i);
+        if (!ch.has_settings || ch.role == meshtastic_Channel_Role_DISABLED) {
+            availableIndex = i;
+            break;
+        }
+    }
+    
+    if (availableIndex == 0xFF) {
+        LOG_ERROR("SensorTelemetryModule: No available channel slots! All 8 channels in use.\n");
+        LOG_WARN("SensorTelemetryModule: Consider disabling unused channels via Meshtastic config\n");
+        return 0xFF;
+    }
+    
+    // Configure the new channel
+    meshtastic_Channel &newChannel = channels.getByIndex(availableIndex);
+    
+    // Clear existing settings
+    memset(&newChannel, 0, sizeof(meshtastic_Channel));
+    
+    // Set basic channel configuration
+    newChannel.index = availableIndex;
+    newChannel.role = meshtastic_Channel_Role_SECONDARY;  // SECONDARY = normal user channel
+    newChannel.has_settings = true;
+    
+    // Set channel name
+    strncpy(newChannel.settings.name, SENSETASTIC_CHANNEL_NAME, sizeof(newChannel.settings.name) - 1);
+    newChannel.settings.name[sizeof(newChannel.settings.name) - 1] = '\0';  // Ensure null termination
+    
+    // Configure as unencrypted channel (for POC)
+    // PSK size = 0 means no encryption
+    newChannel.settings.psk.size = 0;
+    
+    // TODO: For production, add encryption:
+    // const uint8_t sensorPSK[] = {0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
+    //                              0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01};
+    // memcpy(newChannel.settings.psk.bytes, sensorPSK, sizeof(sensorPSK));
+    // newChannel.settings.psk.size = sizeof(sensorPSK);
+    
+    // Set channel to allow uplink/downlink
+    newChannel.settings.uplink_enabled = true;
+    newChannel.settings.downlink_enabled = true;
+    
+    // Module-specific settings
+    newChannel.settings.module_settings.position_precision = 0;  // Don't share position on this channel
+    
+    // Save the channel configuration
+    channels.onConfigChanged();
+    
+    LOG_INFO("SensorTelemetryModule: Successfully created channel '%s' at index %d (UNENCRYPTED)\n", 
+             SENSETASTIC_CHANNEL_NAME, availableIndex);
+    LOG_WARN("SensorTelemetryModule: Channel is UNENCRYPTED - add encryption for production!\n");
+    
+    return availableIndex;
 }

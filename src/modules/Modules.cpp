@@ -33,6 +33,8 @@
 #if !MESHTASTIC_EXCLUDE_DETECTIONSENSOR
 #include "modules/DetectionSensorModule.h"
 #endif
+// Custom sensor telemetry module for Meshtastic Sensor Network
+#include "modules/SensorTelemetryModule.h"
 #if !MESHTASTIC_EXCLUDE_NEIGHBORINFO
 #include "modules/NeighborInfoModule.h"
 #endif
@@ -171,6 +173,8 @@ void setupModules()
 #if !MESHTASTIC_EXCLUDE_POWERSTRESS
     new PowerStressModule();
 #endif
+    // Custom sensor telemetry module - always enabled for Meshtastic Sensor Network
+    sensorTelemetryModule = new SensorTelemetryModule();
     // Example: Put your module here
     // new ReplyModule();
 #if (HAS_BUTTON || ARCH_PORTDUINO) && !MESHTASTIC_EXCLUDE_INPUTBROKER
